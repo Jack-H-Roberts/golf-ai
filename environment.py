@@ -107,9 +107,35 @@ class GolfEnv:
                 self.state[~is_red, idx + 1] = 1.0
 
     def get_action_mask(self):
-        """Returns binary mask [1024, 10]. 1=Legal, 0=Illegal."""
-        mask = torch.ones((self.num_envs, 10), device=self.device)
-        # Placeholder: More complex logic needed once we define step()
+        """
+        Returns a binary mask of shape [1024, 10].
+        Based on the current Stage Flag in the 737-vector.
+        """
+        from utils import STAGE_START
+        mask = torch.zeros((self.num_envs, 10), device=self.device)
+        
+        # Get current stage for all games [Batch, 5]
+        stages = self.state[:, STAGE_START : STAGE_START + 5]
+        
+        # Stage 1: Arrange (Index 0)
+        # Legal: Neurons 0-8 (Grid), Illegal: Neuron 9 (Draw/Discard)
+        arrange_mask = stages[:, 0] == 1.0
+        mask[arrange_mask, 0:9] = 1.0
+        
+        # Stage 2 & 3: Flip 1 & Flip 2 (Indices 1 & 2)
+        # Legal: Neurons 0-8, Illegal: Neuron 9
+        flip_mask = (stages[:, 1] == 1.0) | (stages[:, 2] == 1.0)
+        mask[flip_mask, 0:9] = 1.0
+        
+        # --- Crucial: Mask cards already flipped ---
+        # We don't want the AI to flip the same card twice.
+        # This will be implemented fully once we have the 'Flip' logic.
+
+        # Stage 4 & 5: Play Phase (Indices 3 & 4)
+        # Legal: All neurons 0-9
+        play_mask = (stages[:, 3] == 1.0) | (stages[:, 4] == 1.0)
+        mask[play_mask, 0:10] = 1.0
+        
         return mask
 
     def debug_print_hand(self, player_idx=0):
