@@ -17,7 +17,7 @@ BATCH_SIZE = NUM_ENVS * NUM_STEPS # This is the theoretical max, actual buffer w
 MINIBATCH_SIZE = 16384    
 LEARNING_RATE = 2.5e-4
 SAVE_FILENAME = "latest_model.pt"
-OPPONENT_UPDATE_FREQ = 50 # Every 50 updates, the opponent becomes the current agent
+OPPONENT_UPDATE_FREQ = 100 # Every 50 updates, the opponent becomes the current agent
 
 def train_selfplay():
     torch.backends.cudnn.benchmark = True

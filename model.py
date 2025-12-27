@@ -5,7 +5,7 @@ class GolfModel(nn.Module):
     def __init__(self, input_dim=737, output_dim=10):
         super(GolfModel, self).__init__()
         
-        # The "Shared" brain that understands the game state
+        # Shared feature extractor
         self.shared_layers = nn.Sequential(
             nn.Linear(input_dim, 512),
             nn.ReLU(),
@@ -13,23 +13,23 @@ class GolfModel(nn.Module):
             nn.ReLU()
         )
         
-        # The Actor: Outputs "Logits" for our 10 possible moves
+        # Actor: Outputs Logits for actions
         self.actor = nn.Linear(256, output_dim)
         
-        # The Critic: Outputs a single value (Win Probability)
+        # Critic: Outputs linear Value (Score estimation)
+        # CRITICAL FIX: Removed Sigmoid so it can predict negative/large scores
         self.critic = nn.Linear(256, 1)
 
     def forward(self, x, mask=None):
         shared_out = self.shared_layers(x)
         
-        # Move probabilities
         logits = self.actor(shared_out)
         
-        # Apply the action mask by setting illegal moves to a very large negative number
         if mask is not None:
-            logits = logits + (mask.log()) # Moves where mask=0 become -inf
+            # CRITICAL FIX: Use -1e9 instead of -inf (log(0))
+            # PyTorch Categorical can crash with actual -inf values
+            logits = logits.masked_fill(mask == 0, -1e9)
             
-        # Win probability (clamped between 0 and 1)
-        value = torch.sigmoid(self.critic(shared_out))
+        value = self.critic(shared_out)
         
         return logits, value
