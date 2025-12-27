@@ -1,4 +1,4 @@
-# Feature indices (Stage1, Stage2, Stage3, Stage4, Stage5)
+# Feature indices (Stage1-5)
 STAGE_START = 0
 STAGE_SIZE = 5
 
@@ -14,30 +14,34 @@ SCORES_SIZE = 5
 TRIGGER_START = 15
 TRIGGER_SIZE = 1
 
-# Market (Top Discard 14, Top Draw 1)
+# Market (Top Discard 14 bits, Top Draw 1 bit)
 DISCARD_START = 16
 DISCARD_SIZE = 14
 DRAW_START = 30
 DRAW_SIZE = 1
 
-# Memory (Graveyard 26)
-GRAVEYARD_START = 31
+# Initial Red Bags (5 Players) - Added this segment
+BAG_START = 31
+BAG_SIZE = 5
+
+# Memory (Graveyard 26) - Shifted forward to accommodate Bags
+GRAVEYARD_START = 36
 GRAVEYARD_SIZE = 26
 
 # The Table (675 bits total)
-# 5 Players * 9 Slots * 15 Bits
-TABLE_START = 57 
+# Shifted to start at 62 to accommodate all previous segments
+# 5 Players * 9 Slots * 15 Bits = 675
+TABLE_START = 62 
 SLOT_SIZE = 15
 PLAYER_GRID_SIZE = 9 * SLOT_SIZE # 135
 
 def get_card_color(face_value):
     """
-    Standard Golf: 
+    Standard Golf Color Mapping:
     Red: 2, 3, 4, 5, 6, 7, 8 (point values vary)
     Blue: A, 9, 10, J, Q, K
-    Note: You should adjust this based on your specific deck's rules.
+    Returns: 0 for Red, 1 for Blue.
     """
-    # Example logic: 2-8 are Red (0), others Blue (1)
     if 2 <= face_value <= 8:
         return 0 # Red
     else:
