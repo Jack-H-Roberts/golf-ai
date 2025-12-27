@@ -3,7 +3,7 @@ import torch.nn as nn
 
 class GolfModel(nn.Module):
     def __init__(self, input_dim=737, output_dim=10):
-        super(GolfModel, self).init()
+        super(GolfModel, self).__init__()
         
         # The "Shared" brain that understands the game state
         self.shared_layers = nn.Sequential(
