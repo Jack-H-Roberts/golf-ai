@@ -12,32 +12,35 @@ class GolfEnv:
         self.num_envs = num_envs
         self.device = device
         
-        # [Batch, 737] - The master state vector
+        # [Batch, 737]
         self.state = torch.zeros((num_envs, 737), device=self.device)
         
-        # --- HIDDEN STATE ---
+        # Hidden State
         self.full_decks = torch.zeros((num_envs, 104), device=self.device, dtype=torch.long)
         self.deck_pointers = torch.zeros((num_envs,), device=self.device, dtype=torch.long)
         self.dealer_pos = torch.zeros((num_envs,), device=self.device, dtype=torch.long)
         self.current_player = torch.zeros((num_envs,), device=self.device, dtype=torch.long)
         
-        # Initialization Tracker (0 to 5)
         self.init_count = torch.zeros((num_envs,), device=self.device, dtype=torch.long)
-        
-        # Finisher Tracker (-1 means no one has finished yet)
         self.finisher = torch.full((num_envs,), -1, device=self.device, dtype=torch.long)
+        self.turn_count = torch.zeros((num_envs,), device=self.device, dtype=torch.long)
         
         self.grid_values = torch.zeros((num_envs, 5, 9), device=self.device, dtype=torch.long)
         self.grid_backs = torch.zeros((num_envs, 5, 9), device=self.device, dtype=torch.long)
         self.game_scores = torch.zeros((num_envs, 5), device=self.device, dtype=torch.float)
         
-        # Templates for fast shuffling
+        # Templates
         self.rank_template = torch.cat([torch.arange(1, 14).repeat(4), torch.arange(1, 14).repeat(4)]).to(self.device)
         self.back_template = torch.cat([torch.zeros(52), torch.ones(52)]).long().to(self.device)
         self.shuffled_ranks = torch.zeros((num_envs, 104), device=self.device, dtype=torch.long)
         self.shuffled_backs = torch.zeros((num_envs, 104), device=self.device, dtype=torch.long)
         
-        # Constant helpers for vectorization
+        # Point Lookup (Init once)
+        self.point_lookup = torch.zeros(14, device=self.device)
+        for k,v in POINT_MAP.items():
+            self.point_lookup[k] = v
+
+        # Helpers
         self.batch_indices = torch.arange(self.num_envs, device=self.device)
         self.slot_arange = torch.arange(9, device=self.device).expand(self.num_envs, 9)
 
@@ -59,73 +62,90 @@ class GolfEnv:
             self.state[indices] = 0.0
             self.state[indices, SCORES_START : SCORES_START + 5] = scores_backup
 
-        # Reset Finisher
         self.finisher[indices] = -1
+        self.turn_count[indices] = 0
 
-        # 1. Shuffle
+        # Shuffle & Deal
         rand_idx = torch.rand((n, 104), device=self.device).argsort(dim=1)
         self.shuffled_ranks[indices] = self.rank_template.expand(n, -1).gather(1, rand_idx)
         self.shuffled_backs[indices] = self.back_template.expand(n, -1).gather(1, rand_idx)
         
-        # 2. Deal
         self.grid_values[indices] = self.shuffled_ranks[indices, :45].view(n, 5, 9)
         self.grid_backs[indices] = self.shuffled_backs[indices, :45].view(n, 5, 9)
         
-        # 3. Red Bags
+        # Red Bags
         num_blues = self.grid_backs[indices].sum(dim=2) 
         num_reds = 9 - num_blues
         self.state[indices, BAG_START:BAG_START+5] = num_reds.float()
         
-        # 4. Reveal Discard
-        # VERIFIED: Uses random card from shuffle (Index 45)
+        # Reveal Discard & Draw
         d_ranks = self.shuffled_ranks[indices, 45]
         d_backs = self.shuffled_backs[indices, 45]
         self._update_discard_obs(d_ranks, d_backs, indices=indices)
         
-        # 5. Reveal Draw Color
         self.deck_pointers[indices] = 46
         self._update_draw_obs(indices=indices)
         
-        # 6. Setup First Player
+        # Setup P1
         self.init_count[indices] = 0
         self.current_player[indices] = (self.dealer_pos[indices] + 1) % 5
         self._update_seat_obs(indices)
-        
-        # 7. Set Stage
         self.state[indices, STAGE_START] = 1.0 
 
     def step(self, actions):
         processed_mask = torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)
+        game_started = (self.init_count == 5)
+        self.turn_count[game_started] += 1
 
-        # 1. ARRANGE
+        # --- DENSE REWARD: Pre-Move Score ---
+        # We only calculate this for the active players in 'PLAY' phase
+        # to save perf on init phases.
+        pre_scores = torch.zeros(self.num_envs, device=self.device)
+        is_playing_any = (self.state[:, STAGE_START+3] == 1.0) | (self.state[:, STAGE_START+4] == 1.0)
+        
+        if is_playing_any.any():
+            pre_scores = self._calculate_current_player_scores()
+
+        # --- LOGIC HANDLERS ---
         is_arrange = (self.state[:, STAGE_START] == 1.0) & (~processed_mask)
         if is_arrange.any():
             self._handle_arrange(actions, is_arrange)
             processed_mask[is_arrange] = True
 
-        # 2. FLIP 1
         is_flip1 = (self.state[:, STAGE_START + 1] == 1.0) & (~processed_mask)
         if is_flip1.any():
             self._handle_flip(actions, is_flip1, stage_idx=1)
             processed_mask[is_flip1] = True
             
-        # 3. FLIP 2
         is_flip2 = (self.state[:, STAGE_START + 2] == 1.0) & (~processed_mask)
         if is_flip2.any():
             self._handle_flip(actions, is_flip2, stage_idx=2)
             self._advance_init_phase(is_flip2)
             processed_mask[is_flip2] = True
 
-        # 4. PLAY PHASE
-        is_p2_1 = self.state[:, STAGE_START + 3] == 1.0
-        is_p2_2 = self.state[:, STAGE_START + 4] == 1.0
-        is_playing = (is_p2_1 | is_p2_2) & (~processed_mask)
+        is_playing = (is_p2_1 := (self.state[:, STAGE_START + 3] == 1.0)) | \
+                     (is_p2_2 := (self.state[:, STAGE_START + 4] == 1.0))
+        is_playing = is_playing & (~processed_mask)
         
         if is_playing.any():
             self._handle_play(actions, is_playing)
             processed_mask[is_playing] = True
 
-        # --- UPDATE FINISHER STATUS ---
+        # --- DENSE REWARD: Post-Move Score ---
+        rewards = torch.zeros(self.num_envs, device=self.device)
+        
+        if is_playing_any.any():
+            post_scores = self._calculate_current_player_scores()
+            # Reward = Improvement (Old - New)
+            # Scale: 0.1 (10 point improvement = +1.0 reward)
+            delta = (pre_scores - post_scores)
+            
+            # Filter: Only give reward to those who actually played/changed
+            # (processed_mask & is_playing_any)
+            active = processed_mask & is_playing_any
+            rewards[active] += (delta[active] * 0.1)
+
+        # --- FINISHER ---
         table = self.state[:, TABLE_START:TABLE_START+675].view(self.num_envs, 5, 9, 15)
         face_sums = table[:, :, :, 2:].sum(dim=3) 
         revealed_counts = (face_sums > 0).sum(dim=2)
@@ -137,11 +157,11 @@ class GolfEnv:
             self.finisher[update_mask] = finisher_idx
             self.state[update_mask, TRIGGER_START] = 1.0
 
-        # --- CHECK ROUND OVER ---
-        game_started = (self.init_count == 5)
-        round_over_mask = (self.current_player == self.finisher) & (self.finisher != -1) & game_started
+        # --- ROUND OVER ---
+        normal_end = (self.current_player == self.finisher) & (self.finisher != -1)
+        timeout = (self.turn_count >= 200) 
+        round_over_mask = (normal_end | timeout) & game_started
         
-        rewards = torch.zeros(self.num_envs, device=self.device)
         dones = torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)
         
         if round_over_mask.any():
@@ -155,7 +175,8 @@ class GolfEnv:
             if game_over.any():
                 dones[game_over] = True
                 final_s = self.game_scores[game_over]
-                rewards[game_over] = (final_s[:, 1:].mean(dim=1) - final_s[:, 0]) / 10.0
+                # Terminal Reward: Beating opponents is still the ultimate goal
+                rewards[game_over] += (final_s[:, 1:].mean(dim=1) - final_s[:, 0]) / 10.0
             
             reset_round_mask = round_over_mask & (~game_over)
             if reset_round_mask.any():
@@ -164,7 +185,44 @@ class GolfEnv:
 
         return self.state, rewards, dones, {}
 
-    # --- HANDLERS ---
+    # --- HELPER: Fast Score Calc for Active Player ---
+    def _calculate_current_player_scores(self):
+        # Only calculates score for self.current_player to save perf
+        # Extract current player's grid: [N, 9] values
+        # We need advanced indexing: [batch, current_player, :]
+        
+        p = self.current_player
+        # Gather Grid Values: [N, 9]
+        # self.grid_values is [N, 5, 9]
+        # Expand p to [N, 1, 9]
+        p_expanded = p.view(-1, 1, 1).expand(-1, 1, 9)
+        hand_vals = self.grid_values.gather(1, p_expanded).squeeze(1) # [N, 9]
+        
+        # Convert to Points
+        pts = self.point_lookup[hand_vals] # [N, 9]
+        
+        # Check Columns for Matches (Indices 0,3,6 | 1,4,7 | 2,5,8)
+        c0 = (hand_vals[:,0]==hand_vals[:,3]) & (hand_vals[:,3]==hand_vals[:,6])
+        c1 = (hand_vals[:,1]==hand_vals[:,4]) & (hand_vals[:,4]==hand_vals[:,7])
+        c2 = (hand_vals[:,2]==hand_vals[:,5]) & (hand_vals[:,5]==hand_vals[:,8])
+        
+        # Zero out points in matched columns
+        # Column 0 indices: 0, 3, 6
+        pts[:, 0] = torch.where(c0, torch.tensor(0., device=self.device), pts[:, 0])
+        pts[:, 3] = torch.where(c0, torch.tensor(0., device=self.device), pts[:, 3])
+        pts[:, 6] = torch.where(c0, torch.tensor(0., device=self.device), pts[:, 6])
+        
+        pts[:, 1] = torch.where(c1, torch.tensor(0., device=self.device), pts[:, 1])
+        pts[:, 4] = torch.where(c1, torch.tensor(0., device=self.device), pts[:, 4])
+        pts[:, 7] = torch.where(c1, torch.tensor(0., device=self.device), pts[:, 7])
+        
+        pts[:, 2] = torch.where(c2, torch.tensor(0., device=self.device), pts[:, 2])
+        pts[:, 5] = torch.where(c2, torch.tensor(0., device=self.device), pts[:, 5])
+        pts[:, 8] = torch.where(c2, torch.tensor(0., device=self.device), pts[:, 8])
+        
+        return pts.sum(dim=1)
+
+    # --- HANDLERS (Same as before) ---
     def _handle_arrange(self, actions, mask):
         indices = torch.nonzero(mask).squeeze(1)
         if len(indices) == 0: return
@@ -259,7 +317,6 @@ class GolfEnv:
             acts_21 = act_inds[is_2_1]
             draw_mask = (acts_21 == 9)
             if draw_mask.any():
-                # PASS: Discard old, Draw new
                 d_idx = idx_21[draw_mask]
                 ptr = self.deck_pointers[d_idx]
                 ptr = torch.remainder(ptr, 104) 
@@ -268,7 +325,6 @@ class GolfEnv:
                 drawn_back = self.shuffled_backs[d_idx, ptr]
                 self.deck_pointers[d_idx] += 1
                 
-                # CORRECT: Bury the *current* discard card before replacing it
                 self._add_current_discard_to_graveyard(d_idx)
                 self._update_discard_obs(drawn_rank, drawn_back, indices=d_idx)
                 self._update_draw_obs(indices=d_idx)
@@ -321,9 +377,6 @@ class GolfEnv:
         self.state[row_idx, bases + 1] = (new_back == 1).float() 
         self.state[row_idx, bases + 1 + new_rank] = 1.0
         
-        # BUG FIX: Removed Graveyard update here.
-        # Swapping (Taking the card) does NOT bury it.
-            
         self._update_discard_obs(old_rank, old_back, indices=indices)
 
     def _add_current_discard_to_graveyard(self, indices):
@@ -380,11 +433,6 @@ class GolfEnv:
             col_stack = torch.stack([self.grid_values[:, :, i] for i in cols], dim=2)
             match = (col_stack[:, :, 0] == col_stack[:, :, 1]) & (col_stack[:, :, 1] == col_stack[:, :, 2])
             
-            if not hasattr(self, 'point_lookup'):
-                self.point_lookup = torch.zeros(14, device=self.device)
-                for k,v in POINT_MAP.items():
-                    self.point_lookup[k] = v
-            
             pts = self.point_lookup[col_stack.long()] 
             col_sum = pts.sum(dim=2)
             col_sum = torch.where(match, torch.zeros_like(col_sum), col_sum)
@@ -395,25 +443,19 @@ class GolfEnv:
     def get_action_mask(self):
         mask = torch.zeros((self.num_envs, 10), device=self.device)
         stages = self.state[:, STAGE_START : STAGE_START + 5]
-        
         mask[stages[:, 0] == 1.0, 0:9] = 1.0 
-        
         flip_mask = (stages[:, 1] == 1.0) | (stages[:, 2] == 1.0)
         if flip_mask.any():
             indices = torch.nonzero(flip_mask).squeeze(1)
             p = self.current_player[indices]
-            
             table = self.state[indices, TABLE_START:TABLE_START+675].view(len(indices), 5, 9, 15)
             p_ex = p.view(-1, 1, 1, 1).expand(-1, 1, 9, 15)
             p_grid = table.gather(1, p_ex).squeeze(1) 
-            
             face_sum = p_grid[:, :, 2:].sum(dim=2) 
             is_hidden = (face_sum == 0)
             mask[indices, 0:9] = is_hidden.float()
-            
         play_mask = (stages[:, 3] == 1.0) | (stages[:, 4] == 1.0)
         mask[play_mask, 0:10] = 1.0
-        
         return mask
     
     def reset_indices(self, indices):

@@ -9,7 +9,7 @@ from environment import GolfEnv
 from model import GolfModel
 
 # --- LOCAL SPEED SETTINGS ---
-TOTAL_UPDATES = 200      # Run a bit longer to get a smart AI
+TOTAL_UPDATES = 500      # Run a bit longer to get a smart AI
 NUM_ENVS = 4096          # MAXIMUM PARALLELISM for 2060 Super (Try 2048 if crash)
 NUM_STEPS = 128           # Shorter rollouts to save VRAM with high env count
 BATCH_SIZE = NUM_ENVS * NUM_STEPS
