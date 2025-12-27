@@ -8,18 +8,22 @@ import os
 from environment import GolfEnv
 from model import GolfModel
 
-# --- Local Hyperparameters ---
-TOTAL_UPDATES = 20       # Run for just 20 loops
-NUM_ENVS = 1024          
-NUM_STEPS = 64           
+# --- LOCAL SPEED SETTINGS ---
+TOTAL_UPDATES = 100      # Run a bit longer to get a smart AI
+NUM_ENVS = 4096          # MAXIMUM PARALLELISM for 2060 Super (Try 2048 if crash)
+NUM_STEPS = 32           # Shorter rollouts to save VRAM with high env count
 BATCH_SIZE = NUM_ENVS * NUM_STEPS
-MINIBATCH_SIZE = 2048    
+MINIBATCH_SIZE = 4096    
 LEARNING_RATE = 2.5e-4
-SAVE_FILENAME = "latest_model.pt"  # <--- Added file name
+SAVE_FILENAME = "latest_model.pt"
 
 def train_local():
+    # Speed Optimization: Enable CuDNN Benchmark
+    torch.backends.cudnn.benchmark = True
+    
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"--- STARTING LOCAL GPU TEST ON {device} ---")
+    print(f"--- STARTING LOCAL TRAIN ON {device} ---")
+    print(f"Envs: {NUM_ENVS} | Steps: {NUM_STEPS} | Batch: {BATCH_SIZE}")
     
     # 1. Init
     env = GolfEnv(num_envs=NUM_ENVS, device=device)
@@ -35,11 +39,14 @@ def train_local():
     values = torch.zeros((NUM_STEPS, NUM_ENVS), device=device)
     masks = torch.zeros((NUM_STEPS, NUM_ENVS, 10), device=device)
 
+    # Start Game
     next_obs = env.reset()
     next_done = torch.zeros(NUM_ENVS, device=device)
+    
     start_time = time.time()
 
     for update in range(1, TOTAL_UPDATES + 1):
+        # A. Collect Data
         agent.eval()
         for step in range(NUM_STEPS):
             obs[step] = next_obs
@@ -66,7 +73,7 @@ def train_local():
             if next_done.any():
                 env.reset_indices(next_done.bool())
 
-        # GAE Calculation
+        # B. Calculate Advantages
         with torch.no_grad():
             next_mask = env.get_action_mask()
             _, next_value = agent(next_obs, mask=next_mask)
@@ -83,7 +90,7 @@ def train_local():
                 advantages[t] = lastgaelam = delta + 0.99 * 0.95 * nextnonterminal * lastgaelam
             returns = advantages + values
 
-        # Training
+        # C. Train
         agent.train()
         b_obs = obs.reshape((-1, 737))
         b_logprobs = logprobs.reshape(-1)
@@ -94,6 +101,7 @@ def train_local():
         b_values = values.reshape(-1)
 
         b_inds = np.arange(BATCH_SIZE)
+        
         for epoch in range(4):
             np.random.shuffle(b_inds)
             for start in range(0, BATCH_SIZE, MINIBATCH_SIZE):
@@ -125,20 +133,20 @@ def train_local():
                 nn.utils.clip_grad_norm_(agent.parameters(), 0.5)
                 optimizer.step()
 
-        # Logging
+        # D. Log
         fps = int(BATCH_SIZE / (time.time() - start_time))
-        print(f"Update {update:02d} | FPS: {fps} | Reward: {rewards.mean():.4f} | Loss: {loss.item():.4f}")
+        print(f"Update {update:03d} | FPS: {fps} | Reward: {rewards.mean():.4f} | Loss: {loss.item():.4f}")
         start_time = time.time()
 
-    # --- SAVE ON FINISH ---
-    print("--- Saving Model ---")
+    # --- SAVE MODEL ---
+    print(f"--- Saving to {SAVE_FILENAME} ---")
     checkpoint = {
         'update': TOTAL_UPDATES,
         'model_state_dict': agent.state_dict(),
         'optimizer_state_dict': optimizer.state_dict(),
     }
     torch.save(checkpoint, SAVE_FILENAME)
-    print(f"Saved to {SAVE_FILENAME}")
+    print("Done!")
 
 if __name__ == "__main__":
     train_local()
