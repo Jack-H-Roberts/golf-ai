@@ -9,7 +9,7 @@ from environment import GolfEnv
 from model import GolfModel
 
 # --- Local Hyperparameters ---
-TOTAL_UPDATES = 50       # Run for just 50 loops
+TOTAL_UPDATES = 20       # Run for just 20 loops
 NUM_ENVS = 1024          
 NUM_STEPS = 64           
 BATCH_SIZE = NUM_ENVS * NUM_STEPS
